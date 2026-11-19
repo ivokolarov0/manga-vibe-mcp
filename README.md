@@ -11,7 +11,9 @@ It is **off** until you switch it on.
 
 ## What you need
 
-- **MangaVibe 2.17.0 or newer** (Plugin API 13)
+- **A MangaVibe release newer than 2.17.0** (Plugin API 13). MangaVibe 2.17.0 still has Remote control
+  built in, under the same id, so it keeps its own and this one isn't loaded (Settings → Plugins says
+  why). Until the next release, use a checkout of MangaVibe's `main`.
 
 ## Install
 
@@ -76,7 +78,10 @@ shows after you make a key:
   "http://192.168.1.215:8080/mcp", "--allow-http", "--header", "Authorization:Bearer mvk_1_..."] } } }
 ```
 
-An app that can't send headers can put the key in the address instead: `.../mcp?key=mvk_1_...`.
+An app that can't send headers can put the key in the address instead: `.../mcp?key=mvk_1_...`. Use
+the header when you can: an address is easily logged in full. MangaVibe keeps the key out of its own
+log, but a reverse proxy in front of it, or the assistant app's own logs and settings, may write it
+down as it is.
 
 **From a phone or another computer**, use the address you open MangaVibe with on that device: the
 NAS's address on your home network, or over your VPN (see MangaVibe's

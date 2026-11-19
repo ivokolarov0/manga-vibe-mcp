@@ -61,7 +61,7 @@ async def call_tool(params):
     args = params.get("arguments") or {}
     if not isinstance(args, dict):
         return {"content": [{"type": "text", "text": "arguments must be an object"}], "isError": True}
-    found = tools.available().get(name)
+    found = tools.available().get(name) if isinstance(name, str) else None
     if found is None:
         return None
     if found.admin and not users.current().can_manage:
@@ -88,6 +88,8 @@ async def handle_one(msg):
     if method is None or "id" not in msg:  # a notification (initialized, cancelled) or a client's answer
         return None
     params = msg.get("params") or {}
+    if not isinstance(params, dict):
+        return _error(id_, -32602, "params must be an object")
     if method == "initialize":
         asked = params.get("protocolVersion")
         return _result(id_, {"protocolVersion": asked if asked in VERSIONS else VERSIONS[0],
@@ -111,6 +113,8 @@ async def handle_one(msg):
 async def handle(body):
     """A POSTed body (one message or a batch) -> what to answer, or None for 202 Accepted."""
     if isinstance(body, list):
+        if not body:
+            return _error(None, -32600, "An empty batch")
         answers = [a for a in [await handle_one(m) for m in body] if a is not None]
         return answers or None
     return await handle_one(body)

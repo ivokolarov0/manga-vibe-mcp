@@ -13,7 +13,7 @@ import secrets
 import threading
 import time
 from datetime import datetime, timezone
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, parse_qsl, urlencode, urlparse
 
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse
@@ -29,7 +29,7 @@ TOKEN = re.compile(r"^mvk_(\d+)_([A-Za-z0-9_-]{20,})$")
 USED_EVERY = 600  # "last used" is saved at most this often (seconds), not on every call
 
 _used_lock = threading.Lock()
-_used_saved: dict[str, float] = {}  # key id -> when "last used" was saved
+_used_saved: dict[tuple[int, str], float] = {}  # (user id, key id) -> when "last used" was saved
 
 
 def setting_key(user_id: int) -> str:
@@ -58,7 +58,11 @@ def create(db, user_id, name) -> tuple[dict, str]:
     if len(keys) >= MAX_KEYS:
         raise ValueError(f"At most {MAX_KEYS} keys; delete one you don't use")
     secret = secrets.token_urlsafe(32)
-    row = {"id": secrets.token_hex(4), "name": (name or "").strip()[:60] or "Assistant",
+    taken = {k["id"] for k in keys}
+    key_id = secrets.token_hex(8)
+    while key_id in taken:
+        key_id = secrets.token_hex(8)
+    row = {"id": key_id, "name": (name or "").strip()[:60] or "Assistant",
            "hash": _hash(secret), "created": _now(), "used": None}
     set_setting(db, setting_key(user_id), keys + [row])
     return row, f"mvk_{user_id}_{secret}"
@@ -94,9 +98,9 @@ def user_of_token(token: str):
 
 def _mark_used(db, user_id, key_id):
     with _used_lock:
-        if time.monotonic() - _used_saved.get(key_id, -USED_EVERY) < USED_EVERY:
+        if time.monotonic() - _used_saved.get((user_id, key_id), -USED_EVERY) < USED_EVERY:
             return
-        _used_saved[key_id] = time.monotonic()
+        _used_saved[(user_id, key_id)] = time.monotonic()
     keys = list_keys(db, user_id)
     for k in keys:
         if k["id"] == key_id:
@@ -112,6 +116,16 @@ def token_of(scope) -> str:
     if auth.lower().startswith("bearer "):
         return auth[7:].strip()
     return (parse_qs(scope.get("query_string", b"").decode("latin-1")).get("key") or [""])[0]
+
+
+def _hide_key(scope):
+    """Take ?key= out of the request's query string, in the server's own scope (changed in place, not
+    copied), so the access log doesn't write the key down. A proxy in front still logs what it saw."""
+    query = scope.get("query_string", b"")
+    if b"key" not in query:
+        return
+    pairs = parse_qsl(query.decode("latin-1"), keep_blank_values=True)
+    scope["query_string"] = urlencode([(k, v) for k, v in pairs if k != "key"]).encode("latin-1")
 
 
 def _cross_site(scope) -> bool:
@@ -141,9 +155,11 @@ class KeyGuard:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http" or scope["path"].rstrip("/") != PATH:
             return await self.app(scope, receive, send)
+        token = token_of(scope)
+        _hide_key(scope)
         if _cross_site(scope):
             return await _refuse(403, "MangaVibe's MCP server doesn't take calls from web pages")(scope, receive, send)
-        user = await run_in_threadpool(user_of_token, token_of(scope))
+        user = await run_in_threadpool(user_of_token, token)
         if user is None:
             return await _refuse(401, "A MangaVibe key is needed (Settings → Remote control): "
                                       "send it as Authorization: Bearer <key>")(scope, receive, send)
