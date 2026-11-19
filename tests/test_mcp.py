@@ -19,10 +19,10 @@ APP_JS = APP / "app" / "web" / "static" / "js" / "app.js"
 keys = screens = tools = None  # the plugin's modules, once the app has loaded it (plugin_modules)
 
 
-@pytest.fixture(scope="session", autouse=True)
+@pytest.fixture(autouse=True)
 def plugin_modules(client):
     """The plugin's modules as the app loaded them (mangavibe_plugin_mcp.*): a Reload plugins makes them
-    anew, so they're imported from there and not before the app starts."""
+    anew, so they're imported from there, not before the app starts, and again for each test."""
     global keys, screens, tools
     from mangavibe_plugin_mcp import keys, screens, tools  # noqa: F811
 
@@ -124,6 +124,15 @@ def test_protocol(client, key):
     assert r.status_code == 202 and not r.content
     assert mcp.rpc("nope")["error"]["code"] == -32601
     assert mcp.rpc("tools/call", {"name": "nope"})["error"]["code"] == -32602
+    # malformed messages get a JSON-RPC error, not a crash
+    auth = {"Authorization": f"Bearer {key}"}
+    r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": [1]}, headers=auth)
+    assert r.status_code == 200 and r.json()["error"]["code"] == -32602
+    r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": ["x"]}},
+                    headers=auth)
+    assert r.status_code == 200 and r.json()["error"]["code"] == -32602
+    r = client.post("/mcp", json=[], headers=auth)
+    assert r.status_code == 200 and r.json()["error"]["code"] == -32600
     # no event stream from the server
     assert client.get("/mcp", headers={"Authorization": f"Bearer {key}"}).status_code == 405
     names = {t["name"] for t in mcp.rpc("tools/list")["result"]["tools"]}
@@ -156,6 +165,9 @@ def test_library_and_series(client, key):
     mcp.ok("series_update", series_id=sid, favorite=False, reading_status="auto")
     mcp.ok("mark_read", series_id=sid, read=False)
     assert mcp.ok("series_get", series_id=sid)["books"][0]["read"] is False
+    mcp.ok("mark_read", book_id=first, read="true")
+    mcp.ok("mark_read", book_id=first, read="false")  # a string "false" is unread too, not read
+    assert mcp.ok("series_get", series_id=sid)["books"][0]["read"] is False
     missing = mcp.call("series_get", series_id=999999)
     assert missing["isError"] and missing["content"][0]["text"].startswith("404")
 
@@ -168,7 +180,14 @@ def test_settings(client, key):
     assert client.get("/api/settings").json()["reader_brightness"] == 70
     assert mcp.call("settings_change", values={"reader_brightness": 33})["isError"]
     assert mcp.call("settings_change", values={"nope": 1})["isError"]
-    mcp.ok("settings_change", values={"reader_brightness": 100})
+    assert "must be an object" in mcp.call("settings_change", values=[["theme", "light"]])["content"][0]["text"]
+    assert "must be an object" in mcp.call("settings_change", values="theme")["content"][0]["text"]
+    assert mcp.call("settings_change", values={"match_threshold": "abc"})["isError"]
+    assert mcp.call("settings_change", values={"match_threshold": 101})["isError"]
+    before = client.get("/api/settings").json()["match_threshold"]
+    mcp.ok("settings_change", values={"match_threshold": "85"})
+    assert client.get("/api/settings").json()["match_threshold"] == 85
+    mcp.ok("settings_change", values={"match_threshold": before, "reader_brightness": 100})
 
 
 def test_api_request(client, key):
@@ -352,6 +371,42 @@ def test_tool_lists_match_the_page():
     assert set(re.findall(r'\["(\w+)", "', sorts)) == set(tools.SORTS)
     from app.api.system import DEFAULT_SETTINGS
     assert set(tools.SETTINGS) == set(DEFAULT_SETTINGS)
+
+
+def test_key_in_the_address_is_hidden():
+    scope = {"query_string": b"a=1&key=mvk_1_secret&b=2"}
+    keys._hide_key(scope)
+    assert scope["query_string"] == b"a=1&b=2"
+
+
+def test_reload_plugins(client, key):
+    """Reload plugins imports the plugin anew: it loads without errors and its keys still work."""
+    r = client.post("/api/plugins/reload")
+    assert r.status_code == 200, r.text
+    assert "mcp" in manager.plugins and not manager.errors, manager.errors
+    assert Mcp(client, key).rpc("ping")["result"] == {}
+
+
+def test_reload_frees_the_old_hub():
+    """A new import of screens.py (Reload plugins, an update) ends the old hub's waits at once."""
+    import asyncio
+    import importlib.util
+    import sys
+
+    old = screens.hub
+    loop = asyncio.new_event_loop()
+    try:
+        fut = loop.create_future()
+        old.screens[(1, "s")] = screens.Screen("s", 1, waiter=(loop, fut))
+        spec = importlib.util.spec_from_file_location("mangavibe_mcp_reload_test", screens.__file__)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        loop.run_until_complete(asyncio.wait_for(fut, 1))
+        assert fut.result() == [] and not old.screens and module.hub is not old
+        assert sys.modules["mangavibe_mcp_state"].hub is module.hub
+    finally:
+        sys.modules["mangavibe_mcp_state"].hub = old  # the app's own modules keep using this one
+        loop.close()
 
 
 def test_keys_hash_only():

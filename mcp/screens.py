@@ -14,8 +14,10 @@ command can come from another thread or loop (tests use several).
 """
 import asyncio
 import itertools
+import sys
 import threading
 import time
+import types
 from dataclasses import dataclass, field
 
 POLL_SECONDS = 25      # how long a page's ask waits before it asks again
@@ -204,15 +206,32 @@ class Hub:
         for key in [k for k, s in self.screens.items() if not s.waiter and now - s.seen_at > FORGET_SECONDS]:
             del self.screens[key]
 
-    def clear(self):
+    def clear(self, why="Remote control was switched off"):
         with self.lock:
             for s in self.screens.values():
                 if s.waiter:
                     _resolve(*s.waiter, value=[])
             self.screens.clear()
             for loop, fut, *_ in self.pending.values():
-                _resolve(loop, fut, error=NoScreen("Remote control was switched off"))
+                _resolve(loop, fut, error=NoScreen(why))
             self.pending.clear()
 
 
-hub = Hub()
+def _new_hub() -> Hub:
+    """The hub, made anew each time this module is imported. A folder plugin is imported again on every
+    Reload plugins and update (as a fresh mangavibe_plugin_mcp.*), so the hub of the copy before is
+    cleared: its pages' asks end at once and they ask again, now here, instead of waiting out
+    POLL_SECONDS on a hub nobody sends to; tool calls still waiting there fail with a message. The hub
+    in use is kept in a module of its own in sys.modules, which a reload leaves alone."""
+    state = sys.modules.get(_STATE)
+    if state is None:
+        state = sys.modules[_STATE] = types.ModuleType(_STATE)
+    old = getattr(state, "hub", None)
+    if old is not None:
+        old.clear("Remote control was reloaded; try again")
+    state.hub = Hub()
+    return state.hub
+
+
+_STATE = "mangavibe_mcp_state"  # not under mangavibe_plugin_mcp., which a reload removes
+hub = _new_hub()

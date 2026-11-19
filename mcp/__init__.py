@@ -1,7 +1,9 @@
 """Remote control: an MCP server, so an assistant (and, through the Manga Accessibility plugin, a voice)
 can use the whole app: search and filter the library, open series, read, turn pages, change settings,
 and press any button on a screen where MangaVibe is open. A folder plugin: this folder goes into
-MangaVibe's data folder as plugins/mcp/ (see the README). Needs Plugin API 13 (MangaVibe 2.17.0).
+MangaVibe's data folder as plugins/mcp/ (see the README). Needs Plugin API 13 and a MangaVibe newer
+than 2.17.0: that one still has Remote control built in (app/plugins/builtin/mcp, same id), and the
+built-in one wins; this plugin then refuses to load with a message that says so.
 
 Off when it's installed (it's a new way in); switched on in Settings → Plugins, each
 person makes keys in Settings → Remote control and gives one to their assistant with the address
@@ -19,9 +21,13 @@ See the README and MangaVibe's docs/PLUGINS.md (Assistants and voice control).
 """
 from pathlib import Path
 
-from app.plugins import Plugin
+from app.plugins import BUILTIN, Plugin
 
-from . import api, keys
+if (BUILTIN / "mcp" / "__init__.py").exists():  # MangaVibe 2.17.0: its own copy is loaded instead
+    raise RuntimeError("This MangaVibe still has Remote control built in, which is used instead. "
+                       "Update MangaVibe to a version newer than 2.17.0 to use this plugin.")
+
+from . import api, keys  # noqa: E402
 
 HERE = Path(__file__).parent
 
@@ -34,7 +40,7 @@ class RemoteControl(Plugin):
     id = "mcp"
     category = "system"
     name = "Remote control (MCP)"
-    version = "1.0.0"  # a release tagged v<version> is offered as an update (see README)
+    version = "1.0.1"  # a release tagged v<version> is offered as an update (see README)
     repo = "ivokolarov0/manga-vibe-mcp"
     description = ("Lets an assistant use MangaVibe for you through MCP: search, read, turn pages, change "
                    "settings and press any button on an open screen. The base for voice control.")

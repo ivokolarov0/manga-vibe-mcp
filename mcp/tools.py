@@ -1,6 +1,6 @@
 """The MCP server's tools.
 
-Two kinds (see DECISIONS.md, "Remote control: an MCP server"):
+Two kinds (see MangaVibe's DECISIONS.md, "Remote control: an MCP server"):
 - **Data** tools answer from the server. They call the app's own API, as the person whose key it is,
   through the whole app (its plugins' guards too), so they see and may do exactly what that person can
   in the app: a locked library stays locked, owner-only settings stay owner-only.
@@ -308,7 +308,7 @@ async def series_update(args):
        "before_book_id": {"type": "integer", "description": "With series_id: only the books before this one"},
        "read": {"type": "boolean", "description": "true: read (default), false: unread"}})
 async def mark_read(args):
-    read = args.get("read", True) is not False
+    read = str(args.get("read", True)).strip().lower() not in ("false", "0", "no", "off")
     if args.get("book_id"):
         book = await call_api("GET", f"/api/books/{int(args['book_id'])}")
         body = {"page": max(book["page_count"] - 1, 0), "completed": True} if read else {"page": 0, "completed": False}
@@ -378,11 +378,23 @@ async def settings_get(args):
       {"values": {"type": "object", "description": "setting name -> new value"}}, ["values"])
 async def settings_change(args):
     values = args.get("values") or {}
-    unknown = [k for k in values if k not in DEFAULT_SETTINGS]
+    if not isinstance(values, dict):
+        raise ToolError("values must be an object: setting name -> new value")
+    values = dict(values)
+    unknown = [k for k in values if k not in DEFAULT_SETTINGS or k not in SETTINGS]
     if unknown:
         raise ToolError(f"Unknown setting {unknown[0]!r} (see settings_get)")
     for k, v in values.items():
         allowed = SETTINGS[k][1]
+        if k == "match_threshold":
+            try:
+                n = int(str(v).strip())
+            except ValueError:
+                n = -1
+            if not 0 <= n <= 100:
+                raise ToolError("match_threshold is a whole number from 0 to 100")
+            values[k] = n
+            continue
         if allowed and str(v).lower() not in {str(a).lower() for a in allowed}:
             raise ToolError(f"{k} can be one of: {', '.join(map(str, allowed))}")
         if allowed and isinstance(allowed[0], bool):
@@ -401,7 +413,8 @@ API_PATH = re.compile(r"^/api/[A-Za-z0-9_\-./%~]*$")
 
 @tool("api_request", "Call MangaVibe's own HTTP API for anything the other tools don't cover (e.g. plugins' "
       "APIs at /api/plugins/<id>/api/..., Needs attention at /api/attention, scanning at /api/scan). Runs "
-      "as you, with your rights. See docs/developers.md and the routes in app/api/.",
+      "as you, with your rights. See docs/developers.md and the routes in app/api/ of MangaVibe's repo "
+      "(github.com/ivokolarov0/manga-vibe).",
       {"method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"]},
        "path": {"type": "string", "description": "Starts with /api/"},
        "query": {"type": "object", "description": "Query parameters"},
