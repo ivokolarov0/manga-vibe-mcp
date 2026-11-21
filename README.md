@@ -146,8 +146,14 @@ Run them with the app's Python, which has its packages:
 ```
 
 Run them after changing the plugin, and after updating MangaVibe. `test_tool_lists_match_the_page`
-fails when MangaVibe gets a new library filter, sort or setting: add it to `FILTERS`, `SORTS` or
-`SETTINGS` in `mcp/tools.py`.
+fails when MangaVibe gets a new setting, or its built-in library filters or sorts change: add it to
+`SETTINGS`, `FILTERS` or `SORTS` in `mcp/tools.py`.
+
+**The library's filters and sorts** come from MangaVibe itself (`GET /api/library/schema`, Plugin API
+16): they're a plugin's, which the owner can replace or extend, and `library_filters`,
+`library_search` and `screen_library` follow whichever plugin does them. A plugin's own filters are
+listed under `more_filters` and given in `more`. On a MangaVibe from before that, the tools use the
+copies of the built-in ones in `mcp/tools.py` (`FILTERS`, `SORTS`).
 
 ## Layout
 

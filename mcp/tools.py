@@ -129,7 +129,9 @@ def me():
 
 # ---------------------------------------------------------------- library: filters and search
 
-# the library's filters (as FILTER_GROUPS in app.js; a test checks they match)
+# The library's filters and sorts are the library-query plugin's (MangaVibe's Plugin API 16): another
+# plugin can replace or extend the built-in one, and GET /api/library/schema says what it has. These
+# copies of the built-in ones are only for a MangaVibe from before that (a test checks they still match).
 FILTERS = {
     "read": ("Reading status", {"unread": "Unread", "reading": "Reading", "completed": "Completed",
                                 "on_hold": "On hold", "dropped": "Dropped", "plan_to_read": "Plan to read"}),
@@ -147,16 +149,46 @@ SORTS = {"title": "Title", "added": "Recently added", "updated": "Recently updat
 NUMBERS = ("year_min", "year_max", "score_min", "chapters_min", "chapters_max", "volumes_min", "volumes_max")
 
 
+@dataclass
+class Library:
+    """What the library can be filtered and sorted by now: {param: (label, {value: label})} for the
+    filters that take values from a list, and {sort: label}."""
+    choices: dict
+    sorts: dict
+    other: list = field(default_factory=list)  # the other filters: {key, label, kind, params}
+    plugin: str = ""                            # the plugin doing the job ("" before Plugin API 16)
+
+
+def _has_schema() -> bool:
+    from app import plugins as app_plugins
+    return getattr(app_plugins, "API_VERSION", 0) >= 16
+
+
+async def library() -> Library:
+    """The library-query plugin's filters and sorts (GET /api/library/schema), or the built-in copies
+    on a MangaVibe from before Plugin API 16."""
+    if not _has_schema():
+        return Library(dict(FILTERS), dict(SORTS))
+    s = await call_api("GET", "/api/library/schema")
+    choices = {f["params"][0]: (f["label"], dict(f.get("options") or []))
+               for f in s["filters"] if f.get("kind") == "choice" and f.get("params")}
+    other = [{k: f[k] for k in ("key", "label", "kind", "params") if k in f}
+             for f in s["filters"] if f.get("kind") != "choice"]
+    return Library(choices, {x["key"]: x["label"] for x in s["sorts"]}, other, s.get("plugin") or "")
+
+
 def _list(desc, values=None):
     items = {"type": "string", **({"enum": list(values)} if values else {})}
     return {"type": "array", "items": items, "description": desc}
 
 
+# The tools' parameters. The filters with a list of values aren't fixed to the built-in ones (no enum):
+# a plugin that replaces the library's filters may have others, and library_filters says which.
 FILTER_PARAMS = {
     "q": {"type": "string", "description": "Words in a title, an alternative title or an author"},
     "genre": _list("Genres or tags a series must have, all of them (names from library_filters)"),
     "exclude": _list("Genres or tags a series must not have"),
-    **{k: _list(f"{label}: any of these", values) for k, (label, values) in FILTERS.items()},
+    **{k: _list(f"{label}: any of these (values from library_filters)") for k, (label, _) in FILTERS.items()},
     "favorites": {"type": "boolean", "description": "Only favorites"},
     "letter": {"type": "string", "description": "Titles starting with this letter (A-Z), or # for the rest"},
     "year_min": {"type": "integer"}, "year_max": {"type": "integer"},
@@ -164,20 +196,25 @@ FILTER_PARAMS = {
     "chapters_min": {"type": "integer", "description": "Published chapters at least (from the metadata)"},
     "chapters_max": {"type": "integer"}, "volumes_min": {"type": "integer"}, "volumes_max": {"type": "integer"},
     "length_unknown": {"type": "boolean", "description": "With a chapters/volumes range: also series whose length isn't known"},
-    "sort": {"type": "string", "enum": list(SORTS)},
-    "order": {"type": "string", "enum": ["asc", "desc"], "description": "Default: A-Z for title, newest/most first for the rest"},
-    "more": {"type": "object", "description": "More query parameters, as plugins describe them (e.g. the libraries plugin's shelf)"},
+    "sort": {"type": "string", "description": "One of library_filters' sorts, e.g. title, added, read"},
+    "order": {"type": "string", "enum": ["asc", "desc"], "description": "Default: the sort's own (A-Z for title, newest/most first for most)"},
+    "more": {"type": "object", "description": "More query parameters: other filters library_filters lists, "
+             "and what plugins describe (e.g. the libraries plugin's shelf)"},
 }
 
 
-def filter_query(args) -> list[tuple[str, str]]:
-    """The tool's filter arguments as the library page's query (the same one its address has)."""
+def filter_query(args, lib: Library) -> list[tuple[str, str]]:
+    """The tool's filter arguments as the library page's query (the same one its address has). Values
+    and sorts are checked against what the library has now (lib)."""
     out = []
     if args.get("q"):
         out.append(("q", str(args["q"])))
     for k in ("genre", "exclude"):
         out += [(k, str(v)) for v in _as_list(args.get(k))]
-    for k, (_, values) in FILTERS.items():
+    for k in FILTERS.keys() - lib.choices.keys():  # a built-in filter this library doesn't have
+        if _as_list(args.get(k)):
+            raise ToolError(f"This library has no {k} filter: see library_filters")
+    for k, (_, values) in lib.choices.items():
         picked = [str(v) for v in _as_list(args.get(k))]
         bad = [v for v in picked if v not in values]
         if bad:
@@ -194,13 +231,21 @@ def filter_query(args) -> list[tuple[str, str]]:
     if args.get("length_unknown"):
         out.append(("length_unknown", "1"))
     if args.get("sort"):
-        if args["sort"] not in SORTS:
-            raise ToolError(f"Unknown sort {args['sort']!r}: one of {', '.join(SORTS)}")
+        if args["sort"] not in lib.sorts:
+            raise ToolError(f"Unknown sort {args['sort']!r}: one of {', '.join(lib.sorts)}")
         out.append(("sort", args["sort"]))
     if args.get("order") in ("asc", "desc"):
         out.append(("order", args["order"]))
     for k, v in (args.get("more") or {}).items():
-        out += [(str(k), str(x)) for x in _as_list(v)]
+        values = lib.choices.get(str(k), (None, None))[1]
+        picked = [str(x) for x in _as_list(v)]
+        if values is not None:  # a filter with a list of values, given here instead of on its own
+            bad = [x for x in picked if x not in values]
+            if bad:
+                raise ToolError(f"Unknown {k} value {bad[0]!r}: one of {', '.join(values)}")
+            out.append((str(k), ",".join(picked)))
+        else:
+            out += [(str(k), x) for x in picked]
     return out
 
 
@@ -220,14 +265,22 @@ def card(s):
       "metadata, format, collection, the genres and tags in use (with how many series have them), sorts, "
       "letters and length. Use the values with library_search or screen_library.", read_only=True)
 async def library_filters(args):
+    lib = await library()
     tags = await call_api("GET", "/api/tags")
-    return {"filters": {k: {"label": label, "values": values} for k, (label, values) in FILTERS.items()},
-            "genres_and_tags": [{"name": t["name"], "kind": t["kind"], "series": t["count"]} for t in tags],
-            "sorts": SORTS, "letters": "A-Z or #",
-            "numbers": {"year_min/year_max": "start year", "score_min": "score 0-100",
-                        "chapters_min/chapters_max, volumes_min/volumes_max": "published length (metadata)"},
-            "favorites": "true: only favorites", "q": "words in titles and authors",
-            "plugins": "Plugins may add their own tools for more (e.g. libraries, saved searches)."}
+    out = {"filters": {k: {"label": label, "values": values} for k, (label, values) in lib.choices.items()},
+           "genres_and_tags": [{"name": t["name"], "kind": t["kind"], "series": t["count"]} for t in tags],
+           "sorts": lib.sorts, "letters": "A-Z or #",
+           "numbers": {"year_min/year_max": "start year", "score_min": "score 0-100",
+                       "chapters_min/chapters_max, volumes_min/volumes_max": "published length (metadata)"},
+           "favorites": "true: only favorites", "q": "words in titles and authors",
+           "plugins": "Plugins may add their own tools for more (e.g. libraries, saved searches)."}
+    # filters that aren't the built-in ones (a plugin's): the tools take their values in `more`
+    extra = sorted(lib.choices.keys() - FILTERS.keys())
+    if extra:
+        out["more_filters"] = {k: f"in `more`, e.g. more={{\"{k}\": [...]}}" for k in extra}
+    if lib.plugin:
+        out["filtered_by"] = lib.plugin  # the plugin doing the library's filters and sorting
+    return out
 
 
 @tool("library_search", "Search and filter the library; gives the matching series (id, title, reading status, "
@@ -235,7 +288,7 @@ async def library_filters(args):
       {**FILTER_PARAMS, "offset": {"type": "integer", "description": "Skip this many (paging)"},
        "limit": {"type": "integer", "description": "How many, at most 100 (default 30)"}}, read_only=True)
 async def library_search(args):
-    q = filter_query(args) + [("cursor", int(args.get("offset") or 0)),
+    q = filter_query(args, await library()) + [("cursor", int(args.get("offset") or 0)),
                               ("limit", max(1, min(int(args.get("limit") or 30), 100)))]
     r = await call_api("GET", "/api/series", q)
     return {"total": r["total"], "next_offset": r["next_cursor"], "series": [card(s) for s in r["items"]]}
@@ -531,7 +584,7 @@ async def screen_navigate(args):
 @tool("screen_library", "Show the library on the screen with these filters and sort (the same as library_search). "
       "Without any, it shows everything (clears the filters).", FILTER_PARAMS, screen=True)
 async def screen_library(args):
-    query = urlencode(filter_query(args))
+    query = urlencode(filter_query(args, await library()))
     return await on_screen(args, "go", address="#/" + (f"?{query}" if query else ""))
 
 

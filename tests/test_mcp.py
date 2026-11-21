@@ -359,18 +359,59 @@ def test_acts_as_its_person(client, mcp_on):
 
 
 def test_tool_lists_match_the_page():
-    """The filters and settings the tools describe are the page's (app.js): new ones need adding there."""
-    js = APP_JS.read_text(encoding="utf-8")
-    groups = js[js.index("const FILTER_GROUPS"):js.index("const LIST_KEYS")]
-    for key, (_, values) in tools.FILTERS.items():
-        assert f'["{key}",' in groups, key
-        for v in values:
-            assert re.search(rf"\b{re.escape(v)}:", groups), (key, v)
-    assert len(re.findall(r'\["(\w+)", "', groups)) == len(tools.FILTERS)
-    sorts = js[js.index("const SORTS"):js.index("const FILTER_GROUPS")]
-    assert set(re.findall(r'\["(\w+)", "', sorts)) == set(tools.SORTS)
+    """The settings the tools describe are the app's, and the copies of the library's filters and sorts
+    (used on a MangaVibe from before Plugin API 16) are the built-in ones: new ones need adding there."""
+    if tools._has_schema():  # the built-in library-query plugin has them
+        from app.plugins.builtin.library_query import SCHEMA
+        choices = {f["key"]: [v for v, _ in f["options"]] for f in SCHEMA["filters"] if f["kind"] == "choice"}
+        assert choices == {k: list(values) for k, (_, values) in tools.FILTERS.items()}
+        assert [s["key"] for s in SCHEMA["sorts"]] == list(tools.SORTS)
+    else:  # before: the page's lists in app.js
+        js = APP_JS.read_text(encoding="utf-8")
+        groups = js[js.index("const FILTER_GROUPS"):js.index("const LIST_KEYS")]
+        for key, (_, values) in tools.FILTERS.items():
+            assert f'["{key}",' in groups, key
+            for v in values:
+                assert re.search(rf"\b{re.escape(v)}:", groups), (key, v)
+        assert len(re.findall(r'\["(\w+)", "', groups)) == len(tools.FILTERS)
+        sorts = js[js.index("const SORTS"):js.index("const FILTER_GROUPS")]
+        assert set(re.findall(r'\["(\w+)", "', sorts)) == set(tools.SORTS)
     from app.api.system import DEFAULT_SETTINGS
     assert set(tools.SETTINGS) == set(DEFAULT_SETTINGS)
+
+
+EXAMPLE = APP / "examples" / "plugins" / "description_filter.py"
+
+
+@pytest.mark.skipif(getattr(__import__("app.plugins").plugins, "API_VERSION", 0) < 16 or not EXAMPLE.exists(),
+                    reason="needs MangaVibe with Plugin API 16 (the library-query job)")
+def test_tools_follow_a_plugin_that_replaces_the_library_filters(client, key):
+    """With another plugin doing the library's filters and sorting, library_filters lists its filters and
+    library_search takes them (MangaVibe's examples/plugins/description_filter.py adds Description)."""
+    import shutil
+    from conftest import TMP
+    dest = TMP / "data" / "plugins" / EXAMPLE.name
+    shutil.copy(EXAMPLE, dest)
+    client.post("/api/plugins/reload")
+    assert client.put("/api/plugins/description-filter", json={"enabled": True}).status_code == 200
+    try:
+        mcp = Mcp(client, key)
+        filters = mcp.ok("library_filters")
+        assert filters["filtered_by"] == "description-filter"
+        assert filters["filters"]["desc"]["values"] == {"yes": "Has a description", "no": "No description"}
+        assert "desc" in filters["more_filters"] and "read" in filters["filters"]
+        everything = mcp.ok("library_search")["total"]
+        without = mcp.ok("library_search", more={"desc": ["no"]})["total"]
+        with_one = mcp.ok("library_search", more={"desc": "yes"})["total"]
+        assert without + with_one == everything
+        bad = mcp.call("library_search", more={"desc": ["maybe"]})
+        assert bad["isError"] and "yes" in bad["content"][0]["text"]
+        assert mcp.ok("library_search", sort="added")["total"] == everything
+        assert mcp.call("library_search", sort="nonsense")["isError"]
+    finally:
+        client.put("/api/plugins/library-query", json={"enabled": True})
+        dest.unlink()
+        client.post("/api/plugins/reload")
 
 
 def test_key_in_the_address_is_hidden():
