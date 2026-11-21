@@ -40,7 +40,7 @@ class RemoteControl(Plugin):
     id = "mcp"
     category = "system"
     name = "Remote control (MCP)"
-    version = "1.0.1"  # a release tagged v<version> is offered as an update (see README)
+    version = "1.1.0"  # a release tagged v<version> is offered as an update (see README)
     repo = "ivokolarov0/manga-vibe-mcp"
     description = ("Lets an assistant use MangaVibe for you through MCP: search, read, turn pages, change "
                    "settings and press any button on an open screen. The base for voice control.")
