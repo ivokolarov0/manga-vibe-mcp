@@ -399,6 +399,8 @@ SETTINGS = {
     "auto_fullscreen": ("Fullscreen on first tap", [True, False]),
     "preload": ("Pages to preload", [2, 3, 4, 5, 8]),
     "reader_autohide": ("Hide the reader controls after (seconds, 0 never)", [3, 5, 8, 15, 0]),
+    "reader_top_bar": ("Reader top bar: hide with the controls, always visible, or while the page leaves room",
+                       ["hide", "always", "room"]),
     "reader_drawer_side": ("Reading hand", ["right", "left"]),
     "reader_tap_layout": ("Tap zones", ["default", "one-handed", "off"]),
     "reader_volume_keys": ("Android app: volume buttons turn pages", [True, False]),
